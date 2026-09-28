@@ -1,1 +1,53 @@
+name: DevMonitor Android Cloud Build
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-debug:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find DevMonitor ZIP
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -type f -name 'DevMonitor-*.zip' | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "DevMonitor ZIP not found."
+            exit 1
+          fi
+          echo "Using: $ZIP_FILE"
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      - name: Extract DevMonitor project
+        run: |
+          mkdir -p build-source
+          unzip -q "$ZIP_FILE" -d build-source
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradle wrapper executable
+        working-directory: build-source
+        run: chmod +x ./gradlew
+
+      - name: Build DevMonitor debug APK
+        working-directory: build-source
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload DevMonitor APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DevMonitor-debug-apk
+          path: build-source/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
