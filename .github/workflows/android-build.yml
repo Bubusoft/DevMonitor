@@ -1,6 +1,8 @@
 name: DevMonitor Android Cloud Build
 
-on: [workflow_dispatch, push]
+on:
+  workflow_dispatch:
+  push:
 
 jobs:
   build-debug:
@@ -9,33 +11,134 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
-      - name: Find DevMonitor ZIP
+      - name: Select DevMonitor ZIP
+        shell: bash
         run: |
-          ZIP_FILE=$(find . -maxdepth 1 -type f -name 'DevMonitor-*.zip' | head -n 1)
+          set -euo pipefail
+
+          echo "========================================"
+          echo "DevMonitor Cloud Build"
+          echo "========================================"
+
+          ZIP_FILE=""
+
+          # For a normal upload/commit, identify the DevMonitor ZIP
+          # changed by THIS commit.
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            mapfile -t CHANGED_ZIPS < <(
+              git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" |
+              grep -E '^DevMonitor-.*\.zip$' || true
+            )
+
+            if [ "${#CHANGED_ZIPS[@]}" -gt 0 ]; then
+              ZIP_FILE="$(printf '%s\n' "${CHANGED_ZIPS[@]}" | sort -V | tail -n 1)"
+            fi
+          fi
+
+          # Manual workflow runs: use the highest-version ZIP available.
           if [ -z "$ZIP_FILE" ]; then
-            echo "DevMonitor ZIP not found."
+            ZIP_FILE="$(
+              find . -maxdepth 1 -type f -name 'DevMonitor-*.zip' -printf '%f\n' |
+              sort -V |
+              tail -n 1
+            )"
+          fi
+
+          if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: No DevMonitor ZIP was found."
             exit 1
           fi
-          echo "Using: $ZIP_FILE"
+
+          echo "Selected ZIP: $ZIP_FILE"
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
       - name: Extract DevMonitor project
+        shell: bash
         run: |
+          set -euo pipefail
+
           rm -rf build-source
           mkdir -p build-source
+
           unzip -q "$ZIP_FILE" -d build-source
 
+          echo "Extracted project contents:"
+          find build-source -maxdepth 3 -type f \
+            \( -name 'gradlew' \
+            -o -name 'build.gradle' \
+            -o -name 'build.gradle.kts' \
+            -o -name 'settings.gradle' \
+            -o -name 'settings.gradle.kts' \) \
+            -print
+
       - name: Locate Android project
+        shell: bash
         run: |
-          echo "Searching for Gradle project..."
-          find build-source -maxdepth 3 -name gradlew -type f -print
-          PROJECT_DIR=$(dirname "$(find build-source -maxdepth 3 -name gradlew -type f | head -n 1)")
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "Gradle wrapper not found."
+          set -euo pipefail
+
+          GRADLEW="$(
+            find build-source -maxdepth 5 -type f -name gradlew |
+            head -n 1
+          )"
+
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: Gradle wrapper not found in selected ZIP."
             exit 1
           fi
+
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+
+          echo "Project directory: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Read DevMonitor version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+            BUILD_FILE="$PROJECT_DIR/app/build.gradle.kts"
+          elif [ -f "$PROJECT_DIR/app/build.gradle" ]; then
+            BUILD_FILE="$PROJECT_DIR/app/build.gradle"
+          else
+            echo "ERROR: app/build.gradle(.kts) not found."
+            exit 1
+          fi
+
+          echo "Version source: $BUILD_FILE"
+
+          VERSION_NAME="$(
+            grep -E 'versionName[[:space:]]*=[[:space:]]*"[^"]+"' "$BUILD_FILE" |
+            head -n 1 |
+            sed -E 's/.*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/'
+          )"
+
+          VERSION_CODE="$(
+            grep -E 'versionCode[[:space:]]*=[[:space:]]*[0-9]+' "$BUILD_FILE" |
+            head -n 1 |
+            sed -E 's/.*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/'
+          )"
+
+          if [ -z "$VERSION_NAME" ] || [ -z "$VERSION_CODE" ]; then
+            echo "ERROR: Could not read versionName/versionCode."
+            exit 1
+          fi
+
+          ARTIFACT_BASE="DevMonitor-${VERSION_NAME}-v${VERSION_CODE}-debug"
+
+          echo "========================================"
+          echo "Selected ZIP : $ZIP_FILE"
+          echo "Version Name : $VERSION_NAME"
+          echo "Version Code : $VERSION_CODE"
+          echo "Artifact     : ${ARTIFACT_BASE}.apk"
+          echo "========================================"
+
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "ARTIFACT_BASE=$ARTIFACT_BASE" >> "$GITHUB_ENV"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -47,15 +150,60 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Make Gradle wrapper executable
-        run: chmod +x "$PROJECT_DIR/gradlew"
+        shell: bash
+        run: |
+          chmod +x "$PROJECT_DIR/gradlew"
 
       - name: Build DevMonitor debug APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: ./gradlew assembleDebug --stacktrace
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Upload DevMonitor APK
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Rename APK with version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_DIR="$PROJECT_DIR/app/build/outputs/apk/debug"
+
+          APK_FILE="$(
+            find "$APK_DIR" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.apk' |
+            head -n 1
+          )"
+
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: Debug APK was not produced."
+            exit 1
+          fi
+
+          FINAL_APK="$APK_DIR/${ARTIFACT_BASE}.apk"
+
+          mv "$APK_FILE" "$FINAL_APK"
+
+          echo "Final APK: $FINAL_APK"
+          echo "FINAL_APK=$FINAL_APK" >> "$GITHUB_ENV"
+
+      - name: Upload versioned DevMonitor APK
         uses: actions/upload-artifact@v4
         with:
-          name: DevMonitor-debug-apk
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          name: ${{ env.ARTIFACT_BASE }}
+          path: ${{ env.FINAL_APK }}
           if-no-files-found: error
+
+      - name: Build summary
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "BUILD COMPLETE"
+          echo "========================================"
+          echo "Version : $VERSION_NAME"
+          echo "Code    : $VERSION_CODE"
+          echo "APK     : ${ARTIFACT_BASE}.apk"
+          echo "Source  : $ZIP_FILE"
+          echo "========================================"
