@@ -34,14 +34,23 @@ jobs:
             )
 
             if [ "${#CHANGED_ZIPS[@]}" -gt 0 ]; then
-              ZIP_FILE="$(printf '%s\n' "${CHANGED_ZIPS[@]}" | sort -V | tail -n 1)"
+              ZIP_FILE="$(
+                printf '%s\n' "${CHANGED_ZIPS[@]}" |
+                sort -V |
+                tail -n 1
+              )"
             fi
           fi
 
-          # Manual workflow runs: use the highest-version ZIP available.
+          # Manual workflow runs:
+          # use the highest-version DevMonitor ZIP available.
           if [ -z "$ZIP_FILE" ]; then
             ZIP_FILE="$(
-              find . -maxdepth 1 -type f -name 'DevMonitor-*.zip' -printf '%f\n' |
+              find . \
+                -maxdepth 1 \
+                -type f \
+                -name 'DevMonitor-*.zip' \
+                -printf '%f\n' |
               sort -V |
               tail -n 1
             )"
@@ -66,12 +75,16 @@ jobs:
           unzip -q "$ZIP_FILE" -d build-source
 
           echo "Extracted project contents:"
-          find build-source -maxdepth 3 -type f \
-            \( -name 'gradlew' \
-            -o -name 'build.gradle' \
-            -o -name 'build.gradle.kts' \
-            -o -name 'settings.gradle' \
-            -o -name 'settings.gradle.kts' \) \
+          find build-source \
+            -maxdepth 3 \
+            -type f \
+            \( \
+              -name 'gradlew' \
+              -o -name 'build.gradle' \
+              -o -name 'build.gradle.kts' \
+              -o -name 'settings.gradle' \
+              -o -name 'settings.gradle.kts' \
+            \) \
             -print
 
       - name: Locate Android project
@@ -80,7 +93,10 @@ jobs:
           set -euo pipefail
 
           GRADLEW="$(
-            find build-source -maxdepth 5 -type f -name gradlew |
+            find build-source \
+              -maxdepth 5 \
+              -type f \
+              -name 'gradlew' |
             head -n 1
           )"
 
@@ -111,15 +127,21 @@ jobs:
           echo "Version source: $BUILD_FILE"
 
           VERSION_NAME="$(
-            grep -E 'versionName[[:space:]]*=[[:space:]]*"[^"]+"' "$BUILD_FILE" |
+            grep -E \
+              'versionName[[:space:]]*=[[:space:]]*"[^"]+"' \
+              "$BUILD_FILE" |
             head -n 1 |
-            sed -E 's/.*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/'
+            sed -E \
+              's/.*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/'
           )"
 
           VERSION_CODE="$(
-            grep -E 'versionCode[[:space:]]*=[[:space:]]*[0-9]+' "$BUILD_FILE" |
+            grep -E \
+              'versionCode[[:space:]]*=[[:space:]]*[0-9]+' \
+              "$BUILD_FILE" |
             head -n 1 |
-            sed -E 's/.*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/'
+            sed -E \
+              's/.*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/'
           )"
 
           if [ -z "$VERSION_NAME" ] || [ -z "$VERSION_CODE" ]; then
@@ -162,7 +184,7 @@ jobs:
 
           ./gradlew assembleDebug --stacktrace
 
-      - name: Rename APK with version
+      - name: Locate and rename APK
         shell: bash
         run: |
           set -euo pipefail
@@ -186,15 +208,21 @@ jobs:
 
           mv "$APK_FILE" "$FINAL_APK"
 
-          echo "Final APK: $FINAL_APK"
+          echo "========================================"
+          echo "APK CREATED"
+          echo "========================================"
+          echo "APK: $FINAL_APK"
+          echo "========================================"
+
           echo "FINAL_APK=$FINAL_APK" >> "$GITHUB_ENV"
 
-      - name: Upload versioned DevMonitor APK
+      - name: Upload DevMonitor APK
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_BASE }}
           path: ${{ env.FINAL_APK }}
           if-no-files-found: error
+          retention-days: 14
 
       - name: Build summary
         shell: bash
