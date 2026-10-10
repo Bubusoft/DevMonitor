@@ -156,6 +156,11 @@ jobs:
 
           KEYSTORE_FILE="$RUNNER_TEMP/fieldpulse-release.jks"
 
+          if [ -z "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "ERROR: RELEASE_KEYSTORE_BASE64 secret is missing."
+            exit 1
+          fi
+
           printf '%s' "$RELEASE_KEYSTORE_BASE64" |
             base64 --decode > "$KEYSTORE_FILE"
 
@@ -171,7 +176,7 @@ jobs:
         run: |
           chmod +x "$PROJECT_DIR/gradlew"
 
-      - name: Build signed release APK
+      - name: Build signed release APK with Drive configuration
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         env:
@@ -179,8 +184,21 @@ jobs:
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
           RELEASE_KEYSTORE_FILE: ${{ env.RELEASE_KEYSTORE_FILE }}
+          DRIVE_REPORT_API_KEY: ${{ secrets.DRIVE_REPORT_API_KEY }}
         run: |
           set -euo pipefail
+
+          if [ -z "$DRIVE_REPORT_API_KEY" ]; then
+            echo "ERROR: DRIVE_REPORT_API_KEY GitHub Secret is missing or empty."
+            exit 1
+          fi
+
+          if [ -z "$RELEASE_KEY_ALIAS" ] || \
+             [ -z "$RELEASE_STORE_PASSWORD" ] || \
+             [ -z "$RELEASE_KEY_PASSWORD" ]; then
+            echo "ERROR: One or more release-signing secrets are missing."
+            exit 1
+          fi
 
           ./gradlew \
             assembleRelease \
@@ -188,7 +206,39 @@ jobs:
             -Pandroid.injected.signing.store.password="$RELEASE_STORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$RELEASE_KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$RELEASE_KEY_PASSWORD" \
+            -PDRIVE_REPORT_API_KEY="$DRIVE_REPORT_API_KEY" \
             --stacktrace
+
+      - name: Verify Online Reports configuration was compiled
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+
+          BUILD_CONFIG="$(
+            find app/build/generated \
+              -type f \
+              \( -name 'BuildConfig.java' -o -name 'BuildConfig.kt' \) \
+              -path '*release*' |
+            head -n 1
+          )"
+
+          if [ -z "$BUILD_CONFIG" ] || [ ! -f "$BUILD_CONFIG" ]; then
+            echo "ERROR: Release BuildConfig file was not found; cannot verify Drive configuration."
+            exit 1
+          fi
+
+          if ! grep -Fq 'DRIVE_REPORT_API_KEY' "$BUILD_CONFIG"; then
+            echo "ERROR: Drive API key field is missing from release BuildConfig."
+            exit 1
+          fi
+
+          if grep -Eq 'DRIVE_REPORT_API_KEY[[:space:]]*=[[:space:]]*""' "$BUILD_CONFIG"; then
+            echo "ERROR: Drive API key compiled as empty."
+            exit 1
+          fi
+
+          echo "Online Reports API key field is present in release BuildConfig (value hidden)."
 
       - name: Locate and rename APK
         shell: bash
@@ -241,4 +291,5 @@ jobs:
           echo "APK     : ${ARTIFACT_BASE}.apk"
           echo "Source  : $ZIP_FILE"
           echo "Signing : fieldpulse-release"
+          echo "Drive   : API key supplied and BuildConfig checked (value hidden)"
           echo "========================================"
