@@ -25,8 +25,6 @@ jobs:
 
           ZIP_FILE=""
 
-          # For a normal upload/commit, identify the DevMonitor ZIP
-          # changed by THIS commit.
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             mapfile -t CHANGED_ZIPS < <(
               git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" |
@@ -42,8 +40,6 @@ jobs:
             fi
           fi
 
-          # Manual workflow runs:
-          # use the highest-version DevMonitor ZIP available.
           if [ -z "$ZIP_FILE" ]; then
             ZIP_FILE="$(
               find . \
@@ -223,42 +219,87 @@ jobs:
           path: ${{ env.FINAL_APK }}
           if-no-files-found: error
           retention-days: 14
-          
-      - name: Verify Ramus and Drive secrets
+
+      # Ramus is added AFTER the APK artifact is safely uploaded.
+      # A Ramus problem must not invalidate the successful build.
+
+      - name: Set up Node.js for Ramus
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Start Ramus interactive emulator
+        continue-on-error: true
         shell: bash
         env:
           RAMUS_API_KEY: ${{ secrets.RAMUS_API_KEY }}
-          DRIVE_REPORT_FOLDER_ID: ${{ secrets.DRIVE_REPORT_FOLDER_ID }}
-          DRIVE_REPORT_API_KEY: ${{ secrets.DRIVE_REPORT_API_KEY }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
-          check_secret() {
-            local name="$1"
-            local value="$2"
+          echo "========================================"
+          echo "Ramus Interactive Testing"
+          echo "========================================"
 
-            if [ -z "$value" ]; then
-              echo "MISSING: $name"
-              return 1
-            fi
+          if [ -z "${RAMUS_API_KEY:-}" ]; then
+            echo "::warning::RAMUS_API_KEY is missing. APK build and artifact remain available."
+            exit 1
+          fi
 
-            echo "PRESENT: $name"
-          }
+          if [ ! -f "$FINAL_APK" ]; then
+            echo "::warning::Built APK was not found at $FINAL_APK"
+            exit 1
+          fi
 
-          check_secret "RAMUS_API_KEY" "$RAMUS_API_KEY"
-          check_secret "DRIVE_REPORT_FOLDER_ID" "$DRIVE_REPORT_FOLDER_ID"
-          check_secret "DRIVE_REPORT_API_KEY" "$DRIVE_REPORT_API_KEY"
+          echo "APK: $FINAL_APK"
+          echo "Starting Ramus session..."
 
-          echo "Secret presence verification completed."
+          if ! SESSION_OUTPUT="$(
+            npx --yes ramus-cli session start \
+              --apk "$FINAL_APK" \
+              --wait 2>&1
+          )"; then
+            printf '%s\n' "$SESSION_OUTPUT"
+            echo "::warning::Ramus session failed. The APK artifact has already been uploaded."
+            exit 1
+          fi
+
+          printf '%s\n' "$SESSION_OUTPUT"
+
+          WATCH_URL="$(
+            printf '%s\n' "$SESSION_OUTPUT" |
+            grep -Eo 'https://ramus\.dev/share[^[:space:]"]*' |
+            tail -n 1 || true
+          )"
+
+          if [ -z "$WATCH_URL" ]; then
+            echo "::warning::No browser share URL was detected in the Ramus output."
+            echo "Check the Ramus CLI output above for session details."
+            exit 1
+          fi
+
+          {
+            echo "## Ramus Interactive Emulator"
+            echo ""
+            echo "Your DevMonitor debug APK was submitted to Ramus."
+            echo ""
+            echo "**[Open the interactive emulator]($WATCH_URL)**"
+            echo ""
+            echo "> Security: anyone with this share link may be able to control the emulator. Do not share it publicly."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Ramus browser link added to the Actions run summary."
 
       - name: Build summary
+        if: always()
         shell: bash
         run: |
           echo "========================================"
-          echo "BUILD COMPLETE"
+          echo "DEVMonitor BUILD SUMMARY"
           echo "========================================"
-          echo "Version : $VERSION_NAME"
-          echo "Code    : $VERSION_CODE"
-          echo "APK     : ${ARTIFACT_BASE}.apk"
-          echo "Source  : $ZIP_FILE"
+          echo "Version : ${VERSION_NAME:-unknown}"
+          echo "Code    : ${VERSION_CODE:-unknown}"
+          echo "APK     : ${ARTIFACT_BASE:-unknown}.apk"
+          echo "Source  : ${ZIP_FILE:-unknown}"
           echo "========================================"
+          echo "The APK artifact is uploaded separately."
+          echo "Ramus testing status is shown in the step above."
