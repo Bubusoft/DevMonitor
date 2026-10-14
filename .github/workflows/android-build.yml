@@ -223,6 +223,33 @@ jobs:
           path: ${{ env.FINAL_APK }}
           if-no-files-found: error
           retention-days: 14
+          
+      - name: Verify Ramus and Drive secrets
+        shell: bash
+        env:
+          RAMUS_API_KEY: ${{ secrets.RAMUS_API_KEY }}
+          DRIVE_REPORT_FOLDER_ID: ${{ secrets.DRIVE_REPORT_FOLDER_ID }}
+          DRIVE_REPORT_API_KEY: ${{ secrets.DRIVE_REPORT_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          check_secret() {
+            local name="$1"
+            local value="$2"
+
+            if [ -z "$value" ]; then
+              echo "MISSING: $name"
+              return 1
+            fi
+
+            echo "PRESENT: $name"
+          }
+
+          check_secret "RAMUS_API_KEY" "$RAMUS_API_KEY"
+          check_secret "DRIVE_REPORT_FOLDER_ID" "$DRIVE_REPORT_FOLDER_ID"
+          check_secret "DRIVE_REPORT_API_KEY" "$DRIVE_REPORT_API_KEY"
+
+          echo "Secret presence verification completed."
 
       - name: Build summary
         shell: bash
